@@ -1,11 +1,10 @@
-import { prisma, lockRowForUpdate } from '../db/prisma.js';
+import { prisma, runTransaction } from '../db/prisma.js';
 import { ConflictError, NotFoundError, ValidationError } from '../domain/errors.js';
 import { paiseToRupees } from '../domain/money.js';
 import { getUserByHandleOrId } from './userService.js';
 import { applyBalanceChange } from './ledger.js';
 import { serializePayout } from './withdrawalService.js';
 
-const TERMINAL_STATES = ['COMPLETED', 'FAILED', 'CANCELLED', 'REJECTED'];
 const SETTLE_TARGETS = {
   completed: 'COMPLETED',
   failed: 'FAILED',
@@ -24,8 +23,8 @@ const REFUND_STATES = ['FAILED', 'CANCELLED', 'REJECTED'];
  *                          -> mark terminal AND credit the amount back to the
  *                             withdrawable balance so the user can withdraw again
  *
- * Only a non-terminal (PENDING/PROCESSING) withdrawal can be settled, so a
- * repeated/duplicate webhook can never double-refund.
+ * The atomic guarded update only transitions a still-active (PENDING/PROCESSING)
+ * withdrawal, so a duplicate/replayed webhook can never double-refund.
  */
 export async function settlePayout({ payoutId, status, reason = null }) {
   const target = SETTLE_TARGETS[String(status).toLowerCase()];
@@ -33,37 +32,32 @@ export async function settlePayout({ payoutId, status, reason = null }) {
     throw new ValidationError('status must be one of: completed, failed, cancelled, rejected');
   }
 
-  const preview = await prisma.payout.findUnique({
-    where: { id: payoutId },
-    select: { userId: true },
-  });
+  const preview = await prisma.payout.findUnique({ where: { id: payoutId } });
   if (!preview) throw new NotFoundError(`Payout "${payoutId}" not found`);
 
-  return prisma.$transaction(async (tx) => {
-    // Lock order user -> payout, consistent with the rest of the system.
-    await lockRowForUpdate(tx, 'users', preview.userId);
-    await lockRowForUpdate(tx, 'payouts', payoutId);
-
-    const payout = await tx.payout.findUnique({ where: { id: payoutId } });
-
-    if (payout.type !== 'WITHDRAWAL') {
-      throw new ConflictError('Only WITHDRAWAL payouts can be settled', 'NOT_SETTLEABLE');
-    }
-    if (TERMINAL_STATES.includes(payout.status)) {
-      throw new ConflictError(
-        `Payout "${payoutId}" is already settled (status=${payout.status})`,
-        'ALREADY_SETTLED',
-      );
-    }
-
-    const updated = await tx.payout.update({
-      where: { id: payoutId },
+  return runTransaction(async (tx) => {
+    // Atomic transition: only an active WITHDRAWAL is settled.
+    const claim = await tx.payout.updateMany({
+      where: { id: payoutId, type: 'WITHDRAWAL', status: { in: ['PENDING', 'PROCESSING'] } },
       data: {
         status: target,
         failureReason: REFUND_STATES.includes(target) ? (reason ?? target.toLowerCase()) : null,
         completedAt: target === 'COMPLETED' ? new Date() : null,
       },
     });
+
+    if (claim.count === 0) {
+      const p = await tx.payout.findUnique({ where: { id: payoutId } });
+      if (p.type !== 'WITHDRAWAL') {
+        throw new ConflictError('Only WITHDRAWAL payouts can be settled', 'NOT_SETTLEABLE');
+      }
+      throw new ConflictError(
+        `Payout "${payoutId}" is already settled (status=${p.status})`,
+        'ALREADY_SETTLED',
+      );
+    }
+
+    const payout = await tx.payout.findUnique({ where: { id: payoutId } });
 
     let balanceAfter;
     if (REFUND_STATES.includes(target)) {
@@ -80,7 +74,7 @@ export async function settlePayout({ payoutId, status, reason = null }) {
     }
 
     return {
-      payout: serializePayout(updated),
+      payout: serializePayout(payout),
       refunded: REFUND_STATES.includes(target),
       withdrawableBalancePaise: balanceAfter,
       withdrawableBalance: paiseToRupees(balanceAfter),

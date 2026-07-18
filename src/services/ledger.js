@@ -2,11 +2,11 @@
  * Applies a signed change to a user's withdrawable balance AND records the
  * matching append-only ledger entry, inside the caller's transaction.
  *
- * Preconditions: the caller must already hold a FOR UPDATE lock on the user
- * row (see lockRowForUpdate) so concurrent balance changes serialise.
- *
- * `increment` compiles to an atomic `SET balance = balance + $delta` and
- * returns the updated row, so `balanceAfter` is always consistent.
+ * `increment` compiles to an atomic `SET balance = balance + $delta` (Postgres
+ * takes the row lock itself) and returns the updated row, so `balanceAfter` is
+ * always consistent even under concurrent balance changes. Use this for credits
+ * and clawbacks that have no lower bound; guarded debits that must not overdraw
+ * (withdrawals) use a `where balance >= amount` updateMany instead.
  */
 export async function applyBalanceChange(
   tx,

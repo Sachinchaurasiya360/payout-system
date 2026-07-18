@@ -10,7 +10,7 @@
  *
  * Uses the service layer directly (no HTTP) against the configured Postgres.
  */
-import { prisma } from './db/prisma.js';
+import { prisma, warmup } from './db/prisma.js';
 import { createUser, getUserByHandleOrId, serializeUser } from './services/userService.js';
 import { createSale, listSales, serializeSale } from './services/saleService.js';
 import { runAdvancePayoutJob } from './services/advancePayoutService.js';
@@ -31,6 +31,9 @@ async function main() {
   const handle = `john_doe_${Date.now()}`;
 
   line('SETUP');
+  process.stdout.write('Waking database... ');
+  await warmup();
+  console.log('ready');
   await prisma.brand.upsert({
     where: { code: 'brand_1' },
     update: {},

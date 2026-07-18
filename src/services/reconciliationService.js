@@ -1,4 +1,4 @@
-import { prisma, lockRowForUpdate } from '../db/prisma.js';
+import { runTransaction } from '../db/prisma.js';
 import { ConflictError, NotFoundError, ValidationError } from '../domain/errors.js';
 import { reconciliationAdjustment, paiseToRupees } from '../domain/money.js';
 import { applyBalanceChange } from './ledger.js';
@@ -6,16 +6,16 @@ import { applyBalanceChange } from './ledger.js';
 const ALLOWED_TARGETS = { approved: 'APPROVED', rejected: 'REJECTED' };
 
 /**
- * Reconcile a single sale (admin action), moving it from PENDING to
- * APPROVED or REJECTED and applying the resulting balance adjustment:
+ * Reconcile a single sale (admin action): PENDING -> APPROVED/REJECTED, and
+ * apply the resulting balance adjustment:
  *
  *   APPROVED : + (earning - advancePaid)   credited to withdrawable balance
  *   REJECTED : - (advancePaid)             clawed back (user got money they
  *                                          were not entitled to)
  *
- * Only PENDING sales can be reconciled; a second attempt is a 409 so an
- * adjustment can never be applied twice. Lock order is user -> sale (a global
- * convention that avoids deadlocks with the withdrawal/settlement paths).
+ * The atomic guarded update (`where status=PENDING & reconciledAt=null`) makes
+ * this safe under concurrency: only the first caller flips the sale, so the
+ * adjustment can never be applied twice. A second attempt is a 409.
  */
 export async function reconcileSale({ saleId, status }) {
   const target = ALLOWED_TARGETS[String(status).toLowerCase()];
@@ -23,33 +23,27 @@ export async function reconcileSale({ saleId, status }) {
     throw new ValidationError('status must be "approved" or "rejected"');
   }
 
-  return prisma.$transaction(async (tx) => {
-    // Discover the owning user, then lock user before sale.
-    const preview = await tx.sale.findUnique({
-      where: { id: saleId },
-      select: { userId: true },
+  return runTransaction(async (tx) => {
+    const existing = await tx.sale.findUnique({ where: { id: saleId } });
+    if (!existing) throw new NotFoundError(`Sale "${saleId}" not found`);
+
+    // Atomic claim: only a still-PENDING, not-yet-reconciled sale is updated.
+    const claim = await tx.sale.updateMany({
+      where: { id: saleId, status: 'PENDING', reconciledAt: null },
+      data: { status: target, reconciledAt: new Date() },
     });
-    if (!preview) throw new NotFoundError(`Sale "${saleId}" not found`);
-
-    await lockRowForUpdate(tx, 'users', preview.userId);
-    await lockRowForUpdate(tx, 'sales', saleId);
-
-    const sale = await tx.sale.findUnique({ where: { id: saleId } });
-    if (sale.status !== 'PENDING' || sale.reconciledAt) {
+    if (claim.count === 0) {
       throw new ConflictError(
-        `Sale "${saleId}" is already reconciled (status=${sale.status})`,
+        `Sale "${saleId}" is already reconciled (status=${existing.status})`,
         'ALREADY_RECONCILED',
       );
     }
 
+    // Re-read to compute the adjustment from authoritative values.
+    const sale = await tx.sale.findUnique({ where: { id: saleId } });
     const adjustment = reconciliationAdjustment(target, sale.earning, sale.advancePaidAmount);
 
-    const updatedSale = await tx.sale.update({
-      where: { id: saleId },
-      data: { status: target, reconciledAt: new Date() },
-    });
-
-    let balanceAfter = null;
+    let balanceAfter;
     if (adjustment !== 0) {
       balanceAfter = await applyBalanceChange(tx, {
         userId: sale.userId,
@@ -64,7 +58,7 @@ export async function reconcileSale({ saleId, status }) {
     }
 
     return {
-      sale: updatedSale,
+      sale,
       adjustmentPaise: adjustment,
       adjustment: paiseToRupees(adjustment),
       withdrawableBalancePaise: balanceAfter,
@@ -74,9 +68,8 @@ export async function reconcileSale({ saleId, status }) {
 }
 
 /**
- * Convenience bulk reconcile: `[{ saleId, status }, ...]`. Each sale is
- * reconciled in its own transaction so one bad entry does not roll back the
- * rest; per-item outcomes are returned.
+ * Bulk reconcile: `[{ saleId, status }, ...]`. Each sale is reconciled in its
+ * own transaction so one bad entry does not roll back the rest.
  */
 export async function reconcileMany(entries) {
   const items = [];

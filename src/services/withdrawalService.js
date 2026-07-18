@@ -1,10 +1,9 @@
-import { prisma, lockRowForUpdate } from '../db/prisma.js';
+import { runTransaction } from '../db/prisma.js';
 import { config } from '../config/env.js';
 import { BusinessRuleError, RateLimitError } from '../domain/errors.js';
 import { rupeesToPaise, paiseToRupees } from '../domain/money.js';
 import { getUserByHandleOrId } from './userService.js';
 import { paymentGateway } from './paymentGateway.js';
-import { applyBalanceChange } from './ledger.js';
 
 // A withdrawal in one of these states counts against the 24h limit. FAILED /
 // CANCELLED / REJECTED withdrawals are excluded, which is exactly what lets a
@@ -14,18 +13,16 @@ const ACTIVE_WITHDRAWAL_STATES = ['PENDING', 'PROCESSING', 'COMPLETED'];
 /**
  * Initiate a user-requested withdrawal.
  *
- * Enforces:
- *   - one active withdrawal per 24h window,
- *   - amount within the available withdrawable balance,
- *   - idempotency via a client-supplied key (safe retries of the same request).
- *
- * The balance is debited at initiation; if the payout later fails it is
- * credited back (see payoutService.settlePayout).
+ * Enforces: one active withdrawal per 24h window; amount within the available
+ * balance; idempotency via a client key. The balance is debited at initiation
+ * with an ATOMIC GUARDED decrement (`where balance >= amount`) so two
+ * concurrent withdrawals can never overdraw. If the payout later fails the
+ * amount is credited back (see payoutService.settlePayout).
  */
 export async function initiateWithdrawal({ userId, amount, idempotencyKey = null }) {
   const user = await getUserByHandleOrId(userId);
 
-  return prisma.$transaction(async (tx) => {
+  return runTransaction(async (tx) => {
     // Idempotent replay: same key => return the original payout, no re-debit.
     if (idempotencyKey) {
       const prior = await tx.payout.findUnique({ where: { idempotencyKey } });
@@ -35,13 +32,12 @@ export async function initiateWithdrawal({ userId, amount, idempotencyKey = null
       }
     }
 
-    await lockRowForUpdate(tx, 'users', user.id);
-    const locked = await tx.user.findUnique({ where: { id: user.id } });
+    const current = await tx.user.findUnique({ where: { id: user.id } });
 
     // Default to withdrawing the entire available balance.
     const amountPaise =
       amount === undefined || amount === null
-        ? locked.withdrawableBalance
+        ? current.withdrawableBalance
         : rupeesToPaise(amount);
 
     if (amountPaise <= 0) {
@@ -50,9 +46,9 @@ export async function initiateWithdrawal({ userId, amount, idempotencyKey = null
         'INVALID_AMOUNT',
       );
     }
-    if (amountPaise > locked.withdrawableBalance) {
+    if (amountPaise > current.withdrawableBalance) {
       throw new BusinessRuleError(
-        `Insufficient balance: requested ${paiseToRupees(amountPaise)}, available ${paiseToRupees(locked.withdrawableBalance)}`,
+        `Insufficient balance: requested ${paiseToRupees(amountPaise)}, available ${paiseToRupees(current.withdrawableBalance)}`,
         'INSUFFICIENT_BALANCE',
       );
     }
@@ -91,15 +87,29 @@ export async function initiateWithdrawal({ userId, amount, idempotencyKey = null
       throw err;
     }
 
-    const balanceAfter = await applyBalanceChange(tx, {
-      userId: user.id,
-      amount: -amountPaise,
-      type: 'WITHDRAWAL_DEBIT',
-      payoutId: payout.id,
-      reason: 'Withdrawal initiated',
+    // Atomic guarded debit: succeeds only if the balance still covers it.
+    const debit = await tx.user.updateMany({
+      where: { id: user.id, withdrawableBalance: { gte: amountPaise } },
+      data: { withdrawableBalance: { decrement: amountPaise } },
+    });
+    if (debit.count === 0) {
+      // Lost a race to another concurrent withdrawal — abort (rolls back the payout).
+      throw new BusinessRuleError('Insufficient balance', 'INSUFFICIENT_BALANCE');
+    }
+
+    const after = await tx.user.findUnique({ where: { id: user.id } });
+    await tx.balanceTransaction.create({
+      data: {
+        userId: user.id,
+        amount: -amountPaise,
+        type: 'WITHDRAWAL_DEBIT',
+        balanceAfter: after.withdrawableBalance,
+        payoutId: payout.id,
+        reason: 'Withdrawal initiated',
+      },
     });
 
-    return buildResult(payout, balanceAfter, { replayed: false });
+    return buildResult(payout, after.withdrawableBalance, { replayed: false });
   });
 }
 

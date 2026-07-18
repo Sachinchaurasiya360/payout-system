@@ -6,11 +6,17 @@
 
 generator client {
   provider = "prisma-client-js"
+  // "native" for local dev; the rhel target is what Vercel's serverless
+  // (AWS Lambda / Amazon Linux) needs to load the query engine.
+  binaryTargets = ["native", "rhel-openssl-3.0.x"]
 }
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
+  // Pooled (pgBouncer) connection used by the app at runtime.
+  url = env("DATABASE_URL")
+  // Direct connection used by `prisma migrate` (pgBouncer can't run migrations).
+  directUrl = env("DIRECT_URL")
 }
 
 // ---------------------------------------------------------------------------

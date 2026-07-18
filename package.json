@@ -12,10 +12,13 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev --name init",
     "prisma:reset": "prisma migrate reset --force",
+    "db:setup": "node scripts/db-setup.js",
     "seed": "node prisma/seed.js",
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "demo": "node src/demo.js"
+    "demo": "node src/demo.js",
+    "postinstall": "prisma generate",
+    "vercel-build": "prisma generate"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",
@@ -25,5 +28,8 @@
   },
   "devDependencies": {
     "prisma": "^5.22.0"
+  },
+  "prisma": {
+    "seed": "node prisma/seed.js"
   }
 }
