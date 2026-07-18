@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Low-Level Design + working implementation of a user payout management system for affiliate sales (advance payouts, reconciliation, withdrawals, failed-payout recovery).",
   "type": "module",
+  "main": "src/server.js",
   "engines": {
     "node": ">=18"
   },
