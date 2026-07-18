@@ -1,0 +1,179 @@
+// Prisma schema for the User Payout Management System.
+//
+// Money convention: every monetary column stores an INTEGER number of *paise*
+// (1 rupee = 100 paise). Integers avoid floating-point rounding errors in a
+// financial ledger. The API accepts/returns rupees and converts at the boundary.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum SaleStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum PayoutType {
+  ADVANCE // system-initiated 10% pre-payment on a pending sale
+  WITHDRAWAL // user-initiated withdrawal of their withdrawable balance
+}
+
+enum PayoutStatus {
+  PENDING // created, money movement in flight
+  PROCESSING // accepted by the payment gateway
+  COMPLETED // money successfully delivered to the user
+  FAILED // gateway reported a hard failure
+  CANCELLED // cancelled before completion
+  REJECTED // rejected by the gateway / bank
+}
+
+// Signed entries in the withdrawable-balance ledger.
+enum BalanceTxnType {
+  RECONCILIATION_CREDIT // approved sale -> remaining 90% owed to user  (+)
+  RECONCILIATION_CLAWBACK // rejected sale -> advance already paid is clawed back (-)
+  WITHDRAWAL_DEBIT // user withdrew funds                              (-)
+  WITHDRAWAL_REVERSAL // a withdrawal failed/cancelled/rejected -> refund (+)
+}
+
+// ---------------------------------------------------------------------------
+// Models
+// ---------------------------------------------------------------------------
+
+model User {
+  id     String @id @default(cuid())
+  handle String @unique // human id, e.g. "john_doe"
+
+  // Cached running total of the balance ledger (paise). Source of truth is the
+  // sum of BalanceTransaction.amount; this column is updated in the SAME
+  // transaction as every ledger write, so it can never drift.
+  withdrawableBalance Int @default(0)
+
+  sales               Sale[]
+  payouts             Payout[]
+  balanceTransactions BalanceTransaction[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("users")
+}
+
+model Brand {
+  id   String @id @default(cuid())
+  code String @unique // e.g. "brand_1"
+  name String
+
+  sales Sale[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("brands")
+}
+
+model Sale {
+  id String @id @default(cuid())
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  brandId String
+  brand   Brand  @relation(fields: [brandId], references: [id])
+
+  status  SaleStatus @default(PENDING)
+  earning Int // gross earning for this sale, in paise
+
+  // Set atomically when (and only when) an advance payout is SUCCESSFULLY
+  // transferred. `advancePaidAt IS NULL` is the idempotency guard for the
+  // advance-payout job.
+  advancePaidAmount Int       @default(0)
+  advancePaidAt     DateTime?
+
+  // Set when an admin reconciles the sale to APPROVED/REJECTED. A non-null
+  // value blocks re-reconciliation.
+  reconciledAt DateTime?
+
+  // The single advance payout for this sale (if any). Enforced 1:1 by the
+  // unique constraint on Payout.saleId.
+  advancePayout Payout?
+
+  balanceTransactions BalanceTransaction[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, status]) // "eligible pending sales for a user" scan
+  @@index([userId, advancePaidAt]) // advance-payout job scan
+  @@map("sales")
+}
+
+model Payout {
+  id String @id @default(cuid())
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  type   PayoutType
+  status PayoutStatus @default(PENDING)
+  amount Int // always positive, in paise (money moving out to the user)
+
+  // For ADVANCE payouts only: the sale being pre-paid. UNIQUE => at most one
+  // advance payout can ever exist per sale. Postgres allows many NULLs, so
+  // WITHDRAWAL payouts (saleId = null) are unconstrained.
+  saleId String? @unique
+  sale   Sale?   @relation(fields: [saleId], references: [id])
+
+  // For WITHDRAWAL payouts: client-supplied key that makes "initiate
+  // withdrawal" safely retryable (dedupes double submits).
+  idempotencyKey String? @unique
+
+  providerRef   String? // reference returned by the payment gateway
+  failureReason String?
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  completedAt DateTime?
+
+  balanceTransactions BalanceTransaction[]
+
+  @@index([userId, type, status, createdAt]) // 24h withdrawal-window lookup
+  @@map("payouts")
+}
+
+// Append-only ledger of every change to a user's withdrawable balance.
+// Provides a full audit trail and lets the cached User.withdrawableBalance be
+// reconstructed by summing amounts.
+model BalanceTransaction {
+  id String @id @default(cuid())
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  type   BalanceTxnType
+  amount Int // signed delta in paise (+credit / -debit)
+
+  balanceAfter Int // user's balance immediately after applying this entry
+
+  saleId String?
+  sale   Sale?   @relation(fields: [saleId], references: [id])
+
+  payoutId String?
+  payout   Payout? @relation(fields: [payoutId], references: [id])
+
+  reason String?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@map("balance_transactions")
+}

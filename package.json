@@ -1,0 +1,29 @@
+{
+  "name": "payout-management-system",
+  "version": "1.0.0",
+  "description": "Low-Level Design + working implementation of a user payout management system for affiliate sales (advance payouts, reconciliation, withdrawals, failed-payout recovery).",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev --name init",
+    "prisma:reset": "prisma migrate reset --force",
+    "seed": "node prisma/seed.js",
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "demo": "node src/demo.js"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "prisma": "^5.22.0"
+  }
+}
