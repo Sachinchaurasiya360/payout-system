@@ -202,24 +202,6 @@ requires zero changes elsewhere.
 Errors return a consistent body: `{ "error": { "code", "message", "details?" } }`
 with an appropriate HTTP status (400/404/409/422/429/500).
 
-### Example flow (curl)
-
-```bash
-curl -XPOST localhost:3000/users -H 'content-type: application/json' -d '{"handle":"john_doe"}'
-curl -XPOST localhost:3000/brands -H 'content-type: application/json' -d '{"code":"brand_1"}'
-# create 3 sales @ ₹40 ...
-curl -XPOST localhost:3000/sales -H 'content-type: application/json' -d '{"userId":"john_doe","brand":"brand_1","earning":40}'
-# advance payout job (10% of ₹120 = ₹12 transferred)
-curl -XPOST localhost:3000/jobs/advance-payout -H 'content-type: application/json' -d '{"userId":"john_doe"}'
-# reconcile
-curl -XPOST localhost:3000/sales/<id1>/reconcile -H 'content-type: application/json' -d '{"status":"rejected"}'
-curl -XPOST localhost:3000/sales/<id2>/reconcile -H 'content-type: application/json' -d '{"status":"approved"}'
-# balance is now ₹68 -> withdraw
-curl -XPOST localhost:3000/users/john_doe/withdrawals -H 'content-type: application/json' -d '{"amount":68,"idempotencyKey":"wd-1"}'
-# if the payout fails, refund + retry:
-curl -XPOST localhost:3000/payouts/<payoutId>/settle -H 'content-type: application/json' -d '{"status":"failed"}'
-```
-
 ---
 
 ## 6. Concurrency, idempotency & edge cases
@@ -342,11 +324,3 @@ keep it reliable there:
   `/payouts/:id/settle`, mirroring how real payout providers confirm later.
 - **`GATEWAY_MODE`**: `auto` (withdrawals stay PENDING for the demo) vs `always`
   (auto-complete) — lets you exercise the failure path without external infra.
-
-## 8. What a production version would add
-
-Idempotent job runner with a scheduler/queue (BullMQ), gateway webhook signature
-verification, outbox pattern for the transfer call (so a crash between DB commit
-and gateway call is recoverable), per-user rate limiting at the edge,
-authn/authz (admin vs user), pagination on list endpoints, and structured
-logging/metrics/tracing.
