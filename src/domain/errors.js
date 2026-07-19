@@ -1,10 +1,3 @@
-/**
- * Typed application errors.
- *
- * Each carries an HTTP `status` and a machine-readable `code` so the Express
- * error handler can translate any thrown domain error into a consistent JSON
- * response without a big switch statement.
- */
 
 export class AppError extends Error {
   constructor(message, { status = 500, code = 'INTERNAL_ERROR', details } = {}) {
@@ -30,10 +23,6 @@ export class NotFoundError extends AppError {
   }
 }
 
-/**
- * 409 — request conflicts with current state (e.g. re-reconciling an
- * already-reconciled sale, settling a terminal payout).
- */
 export class ConflictError extends AppError {
   constructor(message, code = 'CONFLICT') {
     super(message, { status: 409, code });

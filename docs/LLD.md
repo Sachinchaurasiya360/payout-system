@@ -1,43 +1,46 @@
-# User Payout Management System — Low-Level Design
+# User Payout Management System — LLD
 
-> Node.js + Express + Prisma + PostgreSQL. This document covers the domain model,
-> database schema, class/module design, APIs, edge cases, and the key trade-offs.
-> The worked example from the brief (final payout **₹68**) is reproduced by
-> `src/demo.js`.
+Node.js + Express + Prisma + PostgreSQL.
+
+This is the low-level design I followed while building the payout system. I kept
+the focus on the parts where bugs can easily happen: money storage, duplicate
+payouts, reconciliation, withdrawals, and failed payout recovery.
+
+The worked example from the brief, where the final payout becomes **₹68**, is
+reproduced by `src/demo.js`.
 
 ---
 
 ## 1. Problem, restated
 
-Affiliate sales flow through three states: `pending → approved | rejected`.
+Affiliate sales start as `pending`. Later an admin marks them as `approved` or
+`rejected`.
 
-1. **Advance payout** — every *pending* sale is eligible for an advance of **10%
-   of its earning**. Once an advance has been *successfully transferred* for a
-   sale, that sale must **never** be advanced again, even if the job runs many
-   times (or concurrently).
-2. **Final payout** — when an admin reconciles a sale:
-   - **Approved** → the user is owed the remaining amount: `earning − advanceAlreadyPaid`.
-   - **Rejected** → the advance already paid was not earned, so it is **clawed
-     back**: `− advanceAlreadyPaid`.
-   The user's final payout is the sum of these adjustments.
-3. **Withdrawal restriction** — a user may make only **one withdrawal per 24
-   hours**.
-4. **Failed payout recovery** — if an initiated payout is later *cancelled /
-   rejected / failed*, the amount is credited back to the user's withdrawable
-   balance and they may withdraw it again.
+The main rules:
+
+1. **Advance payout** — while a sale is still pending, the user can get 10% of
+   the earning as an advance. Once that advance is paid, the same sale should not
+   get another advance, even if the job runs again or two jobs run at once.
+2. **Final payout** — when the sale is reconciled:
+   - **Approved** → credit `earning - advanceAlreadyPaid`.
+   - **Rejected** → debit `advanceAlreadyPaid`, because that advance was not
+     actually earned.
+3. **Withdrawal restriction** — only one withdrawal is allowed in 24 hours.
+4. **Failed payout recovery** — if a withdrawal payout fails, the money should go
+   back to the user's balance so they can try again.
 
 ---
 
-## 2. Core modelling decisions
+## 2. Core model decisions
 
 ### 2.1 Money is stored as integer *paise*
 
-Every monetary column is an `Int` number of paise (1 ₹ = 100 paise). Floating
-point (`0.1 + 0.2 !== 0.3`) is unacceptable in a ledger. The HTTP layer accepts
-and returns rupees and converts at the boundary (`src/domain/money.js`).
+Every money column is an `Int` in paise. I did not use floating point for money.
+The API still accepts/returns rupees, but the conversion happens at the edge in
+`src/domain/money.js`.
 
-The advance is `floor(10% of earning)` computed in paise — exact for whole-rupee
-earnings (₹40 → 400 paise → ₹4) and never over-advances for fractional ones.
+Advance amount is `floor(10% of earning)` in paise. For ₹40, that becomes ₹4.
+For fractional values, flooring keeps it from paying extra by accident.
 
 ### 2.2 Two distinct money concepts
 
@@ -46,9 +49,9 @@ earnings (₹40 → 400 paise → ₹4) and never over-advances for fractional o
 | **Advance payout** | Money pushed *directly* to the user for a pending sale (10%). | A `Payout` row of type `ADVANCE`, one per sale. **Does not** touch withdrawable balance. |
 | **Withdrawable balance** | What the user may withdraw, built up at reconciliation. | Cached on `User.withdrawableBalance`; every change is an append-only `BalanceTransaction`. |
 
-This separation is the crux of the design. An advance is *already in the user's
-hands*, so it is **not** part of what they can withdraw. Reconciliation is where
-the balance moves, and it **nets out** the advance already paid:
+This split matters a lot. An advance is already sent to the user, so I did not
+add it to withdrawable balance. The withdrawable balance changes only when the
+sale is reconciled, after subtracting or clawing back the advance:
 
 ```
 APPROVED : balance += (earning − advancePaid)     // remaining 90% (or 100% if no advance)
@@ -64,19 +67,18 @@ Worked example (3 sales @ ₹40, all advanced ₹4):
 | 3 | approved | 40 | 4 | **+36** |
 | | | | **Total** | **₹68** |
 
-### 2.3 The balance is a cached total over an append-only ledger
+### 2.3 Balance is cached, ledger is the history
 
-`User.withdrawableBalance` is a fast-read cache. The **source of truth** is the
-sum of `BalanceTransaction.amount`. Both are written **in the same DB
-transaction**, so the cache can never drift, and the ledger gives a complete
-audit trail (why did the balance change, by how much, referencing which
-sale/payout).
+`User.withdrawableBalance` is there for fast reads. The ledger table
+`BalanceTransaction` keeps the history of every change. Both are written in the
+same DB transaction, otherwise it would be easy for the balance and history to
+go out of sync.
 
 ---
 
 ## 3. Database schema
 
-Full schema in [`prisma/schema.prisma`](../prisma/schema.prisma). Summary:
+Full schema is in [`prisma/schema.prisma`](../prisma/schema.prisma). Short view:
 
 ```
 User 1───∞ Sale            (a user has many sales)
@@ -129,9 +131,9 @@ Indexes: `(userId, status)`, `(userId, advancePaidAt)` for the job scan.
 
 Index: `(userId, type, status, createdAt)` for the 24h window lookup.
 
-> **Why `saleId` UNIQUE nullable works:** PostgreSQL treats `NULL`s as distinct
-> in a unique index, so the many withdrawal payouts (saleId = null) are
-> unconstrained, while any two advance payouts for the *same* sale collide.
+Why `saleId` is unique and nullable: advance payouts have a `saleId`, so the DB
+can block duplicate advances for the same sale. Withdrawal payouts do not have a
+saleId, and Postgres allows many `NULL` values in a unique column.
 
 **balance_transactions** (append-only)
 | column | type | notes |
@@ -146,10 +148,11 @@ Index: `(userId, type, status, createdAt)` for the 24h window lookup.
 
 ---
 
-## 4. Module / "class" design
+## 4. Module design
 
-Layered, dependency-inverted. Services never build HTTP responses; routes never
-touch Prisma.
+I kept the app split into routes, services, domain helpers, and DB access.
+Routes handle HTTP. Services hold the business rules. Domain files keep small
+pure logic like money math. Routes do not directly touch Prisma.
 
 ```
 src/
@@ -176,9 +179,8 @@ src/
    └─ routes/         users, brands, sales, payouts, jobs
 ```
 
-**PaymentGateway** is an interface with a mock implementation. Every service
-depends only on the interface, so swapping in RazorpayX/Cashfree/a bank API
-requires zero changes elsewhere.
+`PaymentGateway` is kept as an interface with a mock implementation. I did this
+so the core payout logic does not depend on one provider from day one.
 
 ---
 
@@ -199,47 +201,44 @@ requires zero changes elsewhere.
 | `POST /payouts/:id/settle` | **gateway webhook sim** `{ status: completed\|failed\|cancelled\|rejected }` → drives recovery |
 | `GET /payouts` | list payouts |
 
-Errors return a consistent body: `{ "error": { "code", "message", "details?" } }`
-with an appropriate HTTP status (400/404/409/422/429/500).
+Errors return this shape: `{ "error": { "code", "message", "details?" } }`.
+The route also sends the matching HTTP status.
 
 ---
 
-## 6. Concurrency, idempotency & edge cases
+## 6. Concurrency, idempotency, and edge cases
 
-> **Concurrency primitive — atomic guarded updates.** This system runs against a
-> pooled (pgBouncer) Postgres, where session-scoped `SELECT … FOR UPDATE` locks
-> don't survive transaction-mode pooling. So every state transition is a single
-> `updateMany({ where: <expected current state>, data: <next state> })`.
-> Postgres applies each such UPDATE atomically under a row lock it takes itself;
-> `count === 0` means another writer already moved the row. That single fact
-> powers idempotency (advance), single-application (reconcile), and
-> no-double-spend (withdraw). Multi-row writes are grouped in an interactive
-> transaction, wrapped by `runTransaction()` which retries transient pooler
-> errors (P1001/P2024/P2028) — safe precisely because the guards make every
-> transaction idempotent.
+The main trick is to use guarded updates. Instead of reading a row and then
+hoping nobody changed it, the update itself checks the current state:
 
-### 6.1 Advance payout — never pay twice (3 layers)
+```js
+updateMany({ where: <expected current state>, data: <next state> })
+```
+
+If `count === 0`, someone else already changed that row. This is used for
+advance payout, reconciliation, and withdrawal balance debit.
+
+I avoided relying on long `SELECT ... FOR UPDATE` style locks because the app is
+made for pooled/serverless Postgres. The guarded update style is simpler to run
+there and easier to reason about in this project.
+
+### 6.1 Advance payout — avoid paying twice
 
 1. **Candidate filter**: job only selects sales with `advancePaidAt IS NULL`.
 2. **Atomic claim**: each sale is claimed with
    `updateMany({ where: { status:'PENDING', advancePaidAt: null }, data: { advancePaidAt: now, advancePaidAmount } })`.
-   Exactly one runner flips the flag; a loser gets `count === 0` and skips. This
-   defeats the read-modify-write race without a session lock.
-3. **`UNIQUE(payouts.saleId)`**: the database physically refuses a duplicate
-   advance row. If layers 1–2 were ever bypassed, the insert throws `P2002`,
-   which the job treats as a *successful* "already advanced" skip.
+   Only one runner can flip the flag. Others get `count === 0` and skip.
+3. **`UNIQUE(payouts.saleId)`**: the DB rejects a duplicate advance row. If
+   something slips past the first two checks, the DB still stops it.
 
-**Claim-then-transfer-then-commit ordering:** inside the transaction the sale is
-claimed first, then the gateway transfer runs, then the payout row is written.
-If the transfer throws, the whole transaction rolls back → the claim is undone →
-`advancePaidAt` stays null → the sale is retried next run. So a failed advance
-never marks the sale paid, and a successful one is recorded atomically.
+The order is claim sale, call gateway, then write the payout row. If the gateway
+throws, the transaction rolls back and `advancePaidAt` stays null, so the next
+job can try again.
 
 ### 6.2 Reconciliation
 
-- Atomic guarded update `where status='PENDING' AND reconciledAt IS NULL`. Only
-  the first caller flips the sale, so the balance adjustment can never be applied
-  twice; a second attempt is **409 `ALREADY_RECONCILED`**.
+- Guarded update: `where status='PENDING' AND reconciledAt IS NULL`. Only the
+  first caller flips the sale. A second attempt gets **409 `ALREADY_RECONCILED`**.
 - Works whether or not the advance ran: if `advancePaidAmount = 0`, an approved
   sale credits the full earning and a rejected sale adjusts by 0.
 - The sale flip, the balance change, and the ledger entry all commit together in
@@ -247,11 +246,12 @@ never marks the sale paid, and a successful one is recorded atomically.
 
 ### 6.3 Withdrawal restriction (1 / 24h)
 
-`enforceWithdrawalWindow` looks for the most recent withdrawal in the last 24h
-whose status is **active** (`PENDING/PROCESSING/COMPLETED`). If found → **429
-`WITHDRAWAL_RATE_LIMITED`** with `nextAllowedAt`. `FAILED/CANCELLED/REJECTED`
-withdrawals are **excluded** — which is exactly what allows an immediate retry
-after a failed payout (§6.5). The window is configurable (`WITHDRAWAL_WINDOW_HOURS`).
+`enforceWithdrawalWindow` checks for a withdrawal in the last 24h with active
+status: `PENDING`, `PROCESSING`, or `COMPLETED`. If it finds one, the API returns
+**429 `WITHDRAWAL_RATE_LIMITED`** with `nextAllowedAt`.
+
+Failed/cancelled/rejected withdrawals are not counted, because the user should
+be able to retry after the money is returned.
 
 ### 6.4 Withdrawal correctness
 
@@ -263,64 +263,58 @@ after a failed payout (§6.5). The window is configurable (`WITHDRAWAL_WINDOW_HO
   resolved by the `UNIQUE(idempotencyKey)` constraint.
 - The balance is debited **at initiation** with an **atomic guarded decrement**
   `updateMany({ where: { withdrawableBalance: { gte: amount } }, data: { decrement } })`.
-  Two concurrent withdrawals can never overdraw: the second gets `count === 0`
-  and the transaction rolls back. All within the same transaction that creates
+  Two concurrent withdrawals cannot overdraw: the second gets `count === 0` and
+  the transaction rolls back. This happens in the same transaction that creates
   the payout.
 
 ### 6.5 Failed payout recovery (`settlePayout`)
 
-Simulates the gateway's async webhook.
+This simulates the gateway webhook.
 - `completed` → mark `COMPLETED` (balance already debited; nothing to do).
 - `failed/cancelled/rejected` → mark terminal **and** credit the amount back
   (`WITHDRAWAL_REVERSAL`), restoring the balance.
-- Only a **non-terminal** payout can be settled → a duplicate/replayed webhook
-  hits **409 `ALREADY_SETTLED`** and can never double-refund.
+- Only a **non-terminal** payout can be settled. A duplicate/replayed webhook
+  hits **409 `ALREADY_SETTLED`**, so it does not refund twice.
 
 ### 6.6 Negative balances
 
-If a user's sales are mostly rejected after advances were paid, clawbacks can
-drive `withdrawableBalance` negative — a genuine "user owes money" state. We
-**allow** it (the debt is real and must be carried), future approved-sale
-credits offset it, and withdrawals are blocked while the balance isn't positive.
+If many sales are rejected after advances were already paid, the user's
+`withdrawableBalance` can become negative. I allowed this because it represents
+real debt. Future approved sale credits reduce that negative balance. Withdrawals
+stay blocked until the balance is positive again.
 
 ### 6.7 No deadlocks, no lost updates
 
-Because there are no explicit multi-row `FOR UPDATE` locks — only single-statement
-guarded updates — there is no lock-ordering discipline to get wrong and no
-deadlock surface. Each guarded `updateMany`/`increment` is atomic at the row
-level; correctness comes from the `where` guard + `count` check, not from holding
-a lock across statements.
+The code does not hold explicit multi-row locks. It mostly uses single guarded
+updates. That means there is less lock ordering to manage. Correctness comes from
+the `where` guard and checking `count`, not from keeping a lock open across many
+statements.
 
 ### 6.8 Connection resilience (pooled / serverless Postgres)
 
-The system targets a pooled Neon endpoint (and Vercel serverless). Three measures
-keep it reliable there:
-- **`connection_limit=1`** on the pooled URL — one client connection per process;
-  avoids exhausting the pooler and the P2024 "pool timeout" it causes.
-- **`warmup()`** — retries a trivial `SELECT 1` on boot to ride out the free-tier
-  compute cold start (auto-suspend → P1001 on the first hit).
-- **`runTransaction()`** — retries transient pooler errors (P1001/P2024/P2028);
-  safe because every transaction is guarded and idempotent, so a retry re-reads
-  and re-applies without side effects.
+The app is meant to work with a pooled Neon DB and Vercel-style deployment.
+
+- **`connection_limit=1`** keeps the process from opening too many DB
+  connections.
+- **`warmup()`** runs a small `SELECT 1` on boot and retries, because hosted DBs
+  can be cold on the first hit.
+- **`runTransaction()`** retries transient Prisma/pooler errors
+  (`P1001/P2024/P2028`). This is okay because the writes are guarded, so retrying
+  does not mean blindly applying the same money change twice.
 
 ---
 
-## 7. Trade-offs & alternatives
+## 7. Trade-offs and alternatives
 
-- **Cached balance + ledger** vs. compute-on-read: caching gives O(1) balance
-  reads and a natural audit log at the cost of writing two rows per change. The
-  same-transaction guarantee keeps them consistent. Chosen because a payout
-  system is read-heavy on balance and demands auditability.
-- **Per-sale advance rows** vs. one aggregate advance: per-sale rows make the
-  `UNIQUE(saleId)` idempotency guard trivial and give exact traceability; the
-  aggregate (₹12) is just their sum.
-- **Atomic guarded updates** vs. pessimistic `SELECT … FOR UPDATE`: guarded
-  single-statement updates work over pgBouncer/serverless (where session locks
-  don't survive transaction pooling), avoid deadlocks entirely, and are cheaper.
-  The trade-off is that a "guard failed" outcome surfaces as `count === 0` for
-  the app to interpret, rather than a blocking wait.
-- **Synchronous advance / webhook-driven withdrawal**: advances are modelled as
-  settling immediately (small, low-risk); withdrawals are async and settled via
-  `/payouts/:id/settle`, mirroring how real payout providers confirm later.
-- **`GATEWAY_MODE`**: `auto` (withdrawals stay PENDING for the demo) vs `always`
-  (auto-complete) — lets you exercise the failure path without external infra.
+- **Cached balance + ledger**: I picked this because balance reads are simple and
+  there is still a history of every change. The downside is writing both the user
+  row and ledger row together every time.
+- **Per-sale advance rows**: one payout row per advanced sale makes duplicate
+  prevention easier with `UNIQUE(saleId)`. A single aggregate advance looked
+  simpler, but then tracing and retry handling become harder.
+- **Guarded updates**: this avoids depending too much on DB session locks. The
+  trade-off is that the app has to handle `count === 0` and decide what it means.
+- **Mock payment gateway**: a real gateway would add webhooks, auth, and provider
+  edge cases. For this project I kept it mocked so the payout rules are clear.
+- **Gateway mode**: `auto` keeps withdrawals pending so failure recovery can be
+  tested. `always` completes them immediately for a simpler run.

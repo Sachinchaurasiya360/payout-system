@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { asyncHandler } from '../middleware/asyncHandler.js';
 import { validate } from '../middleware/validate.js';
-import { createUser, getUserByHandleOrId, serializeUser } from '../../services/userService.js';
+import { createUser, listUsers, getUserByHandleOrId, serializeUser } from '../../services/userService.js';
 import { initiateWithdrawal } from '../../services/withdrawalService.js';
 import { getLedger, listPayouts } from '../../services/payoutService.js';
 
@@ -16,6 +16,13 @@ usersRouter.post(
   asyncHandler(async (req, res) => {
     const user = await createUser(req.body);
     res.status(201).json({ user: serializeUser(user) });
+  }),
+);
+
+usersRouter.get(
+  '/',
+  asyncHandler(async (_req, res) => {
+    res.json({ users: await listUsers() });
   }),
 );
 

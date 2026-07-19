@@ -61,7 +61,6 @@ export function reconciliationAdjustment(status, earningPaise, advancePaidPaise)
   throw new Error(`reconciliationAdjustment: unsupported status "${status}"`);
 }
 
-/** Format paise as a human-readable "₹xx.xx" string (for logs/demo output). */
 export function formatPaise(paise) {
   assertIntegerPaise(paise);
   const sign = paise < 0 ? '-' : '';

@@ -1,0 +1,119 @@
+<div id="account" hidden class="workspace">
+  <!-- Overview band: hero balance + KPI tiles -->
+  <section class="overview">
+    <div class="card balance-card">
+      <p class="eyebrow eyebrow-light">Withdrawable balance</p>
+      <p id="balance" class="balance">₹0.00</p>
+      <p class="account-meta">
+        <span class="cu-dot"></span>
+        <strong id="userHandle"></strong>
+        <span class="dot">·</span>
+        <span id="userId" class="mono"></span>
+      </p>
+    </div>
+    <div class="stats">
+      <div class="stat"><p class="eyebrow">Sales</p><p id="statSales" class="stat-val">0</p></div>
+      <div class="stat"><p class="eyebrow">Pending</p><p id="statPending" class="stat-val">0</p></div>
+      <div class="stat"><p class="eyebrow">Advances paid</p><p id="statAdvanced" class="stat-val">₹0.00</p></div>
+      <div class="stat"><p class="eyebrow">Payouts</p><p id="statPayouts" class="stat-val">0</p></div>
+    </div>
+  </section>
+
+  <!-- Quick actions -->
+  <div class="card actions-card">
+    <p class="eyebrow">Quick actions</p>
+    <div class="actions-grid">
+      <form id="createSaleForm" class="action">
+        <label class="field">
+          <span>Add sale</span>
+          <div class="row">
+            <select name="brand" id="saleBrand" required></select>
+            <input name="earning" type="number" step="0.01" min="0.01" placeholder="₹" required />
+          </div>
+        </label>
+        <button class="btn btn-sm btn-block">Add sale</button>
+      </form>
+
+      <div class="action">
+        <label class="field">
+          <span>Advance payout</span>
+          <p class="hint">Pays 10% on every eligible pending sale (idempotent).</p>
+        </label>
+        <button id="runAdvanceBtn" class="btn btn-sm btn-ghost btn-block" type="button">Run advance job</button>
+      </div>
+
+      <form id="withdrawForm" class="action">
+        <label class="field">
+          <span>Withdraw</span>
+          <input name="amount" type="number" step="0.01" min="0.01" placeholder="amount ₹ (blank = all)" />
+        </label>
+        <input name="idempotencyKey" placeholder="idempotency key (optional)" autocomplete="off" />
+        <button class="btn btn-sm btn-block">Withdraw</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Sales -->
+  <div class="card">
+    <div class="card-head">
+      <h3>Sales <span id="salesCount" class="count"></span></h3>
+      <button class="btn btn-tiny btn-ghost" data-refresh type="button">Refresh</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Brand</th>
+            <th class="num">Earning</th>
+            <th>Status</th>
+            <th class="num">Advance paid</th>
+            <th class="num">Reconcile</th>
+          </tr>
+        </thead>
+        <tbody id="salesBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Payouts -->
+  <div class="card">
+    <div class="card-head">
+      <h3>Payouts <span id="payoutsCount" class="count"></span></h3>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Type</th>
+            <th class="num">Amount</th>
+            <th>Status</th>
+            <th>Details</th>
+            <th class="num">Settle</th>
+          </tr>
+        </thead>
+        <tbody id="payoutsBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Ledger -->
+  <div class="card">
+    <div class="card-head">
+      <h3>Balance ledger <span id="ledgerCount" class="count"></span></h3>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Type</th>
+            <th class="num">Amount</th>
+            <th class="num">Balance after</th>
+            <th>Reason</th>
+            <th>When</th>
+          </tr>
+        </thead>
+        <tbody id="ledgerBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>

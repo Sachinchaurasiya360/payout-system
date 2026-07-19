@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Payout Console</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <!-- Split into partials, loaded client-side by app.js (no build step). -->
+      <header class="topbar" data-include="/partials/topbar.html"></header>
+      <main class="layout is-start">
+        <aside class="col col-controls" data-include="/partials/sidebar.html"></aside>
+        <section class="col col-main" data-include="/partials/account.html"></section>
+      </main>
+    </div>
+    <div id="toasts" class="toasts"></div>
+    <script src="/app.js"></script>
+  </body>
+</html>

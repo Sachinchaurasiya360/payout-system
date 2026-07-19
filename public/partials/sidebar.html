@@ -1,0 +1,58 @@
+<div class="card">
+  <p class="eyebrow">Setup</p>
+  <h2>Get started</h2>
+  <form id="createUserForm" class="stack">
+    <label class="field">
+      <span>Create user</span>
+      <input name="handle" placeholder="handle, e.g. john_doe" autocomplete="off" required />
+    </label>
+    <button class="btn">Create user</button>
+  </form>
+
+  <hr />
+
+  <form id="createBrandForm" class="stack">
+    <label class="field">
+      <span>Create brand</span>
+      <div class="row">
+        <input name="code" placeholder="code, e.g. brand_1" autocomplete="off" required />
+        <input name="name" placeholder="name (optional)" autocomplete="off" />
+      </div>
+    </label>
+    <button class="btn btn-ghost">Create brand</button>
+  </form>
+  <div id="brandsList" class="chips"></div>
+
+  <hr />
+
+  <button id="demoBtn" class="btn btn-soft btn-block" type="button">✨ Scaffold demo account</button>
+</div>
+
+<div class="card">
+  <p class="eyebrow">Accounts</p>
+  <div class="section-title">
+    <h2>Load account</h2>
+    <span id="usersCount" class="count">0</span>
+  </div>
+  <form id="loadUserForm" class="row">
+    <input name="handle" placeholder="handle" autocomplete="off" required />
+    <button class="btn">Load</button>
+  </form>
+
+  <div id="currentUser" class="current-user" hidden>
+    <span class="cu-dot"></span>
+    <div class="cu-text">
+      <strong id="cuHandle"></strong>
+      <span class="cu-id mono" id="cuId"></span>
+    </div>
+    <span id="cuBalance" class="cu-balance"></span>
+  </div>
+
+  <div class="users-head">
+    <span class="eyebrow">All accounts</span>
+    <span id="usersLoader" class="spinner" hidden aria-label="loading"></span>
+  </div>
+  <div id="usersList" class="users-list">
+    <span class="muted small">Loading…</span>
+  </div>
+</div>

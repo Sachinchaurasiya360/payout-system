@@ -1,3 +1,5 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { usersRouter } from './routes/users.js';
 import { brandsRouter } from './routes/brands.js';
@@ -6,18 +8,31 @@ import { payoutsRouter } from './routes/payouts.js';
 import { jobsRouter } from './routes/jobs.js';
 import { notFoundHandler, errorHandler } from './middleware/errorHandler.js';
 import { warmup } from '../db/prisma.js';
+import { config } from '../config/env.js';
 import { asyncHandler } from './middleware/asyncHandler.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const publicDir = path.join(__dirname, '..', '..', 'public');
 
 export function createApp() {
   const app = express();
   app.use(express.json());
 
-  // DB-independent liveness probe (must not touch the database).
-  app.get('/health', (_req, res) => res.json({ status: 'ok' }));
+  // Web console (static UI). Served before the DB-warmup gate so the page loads
+  // even while Neon's compute is cold; its own API calls trigger the warm-up.
+  app.use(express.static(publicDir));
 
-  // Warm the DB connection once per process before serving DB-backed routes.
-  // On serverless each cold start is a fresh process, so this rides out Neon's
-  // compute wake-up on the first request without penalising later ones.
+  // DB-independent liveness probe (must not touch the database). Also surfaces
+  // a little config the UI displays.
+  app.get('/health', (_req, res) =>
+    res.json({
+      status: 'ok',
+      gatewayMode: config.gatewayMode,
+      withdrawalWindowHours: config.withdrawalWindowHours,
+    }),
+  );
+
+  
   let warmed = null;
   app.use(
     asyncHandler(async (_req, _res, next) => {
@@ -25,7 +40,7 @@ export function createApp() {
         warmed = warmed ?? warmup();
         await warmed;
       } catch (err) {
-        warmed = null; // allow a later request to retry the wake-up
+        warmed = null; 
         throw err;
       }
       next();

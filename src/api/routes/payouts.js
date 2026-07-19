@@ -18,7 +18,6 @@ const settleSchema = z.object({
   reason: z.string().max(500).optional(),
 });
 
-// Simulates the payment gateway's async webhook. Drives failed-payout recovery.
 payoutsRouter.post(
   '/:id/settle',
   validate(settleSchema),

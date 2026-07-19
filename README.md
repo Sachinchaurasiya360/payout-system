@@ -1,5 +1,9 @@
 # User Payout Management System
 
+**Live demo:** [https://payout-management-system-swart.vercel.app/](https://payout-management-system-swart.vercel.app/)
+
+**LLD diagram:** [https://excalidraw.com/#json=g9vuxxaLsrvpVhXag7AKM,BP8IMaVo7wOHi7zCCJnGUw](https://excalidraw.com/#json=g9vuxxaLsrvpVhXag7AKM,BP8IMaVo7wOHi7zCCJnGUw)
+
 A payout system for affiliate sales. It pays users an advance of 10% on their
 pending earnings, lets an admin reconcile each sale later to settle the final
 amount owed, limits users to one withdrawal every 24 hours, and recovers cleanly
@@ -45,8 +49,8 @@ npm run prisma:migrate       # or: npx prisma migrate reset --force to drop, rec
 # 3. Run the end-to-end walkthrough (reproduces the ₹68 example above)
 npm run demo
 
-# 4. Start the API
-npm start                    # http://localhost:3000/health
+# 4. Start the API + web console
+npm start                    # http://localhost:3000
 ```
 
 Prefer a local Postgres over Neon? There's a Docker setup:
@@ -56,17 +60,61 @@ npm run db:up                # starts postgres:16 on :5432 (see docker-compose.y
 # point DATABASE_URL / DIRECT_URL at the local instance, then run the migrate step above
 ```
 
-## Configuration
+## Web console
 
-A handful of environment variables drive everything:
+`npm start` also serves a small web console at
+[http://localhost:3000](http://localhost:3000) — a single-page dashboard (static
+HTML/CSS/JS, no build step) that drives the whole API: create users and brands,
+add sales, run the advance-payout job, reconcile, withdraw, and settle payouts,
+all with a live balance, sales/payouts tables, and the balance ledger. Hit
+**"Scaffold a demo account"** to spin up a user with three ₹40 sales and start
+clicking. The files live in [public/](public/).
 
-| Variable | What it does |
-|----------|--------------|
-| `DATABASE_URL` | The connection used at runtime. On Neon, use the pooled (`-pooler`) URL with `pgbouncer=true`. |
-| `DIRECT_URL` | Used only when running migrations. On Neon, use the direct, non-pooled URL. |
-| `PORT` | The port the API listens on. Defaults to 3000. |
-| `GATEWAY_MODE` | `auto` leaves withdrawals PENDING until you settle them by hand (which is what the demo relies on); `always` completes them straight away. |
-| `WITHDRAWAL_WINDOW_HOURS` | How long a user waits between withdrawals. Defaults to 24. |
+## Different approaches I thought about
+
+### Approach 1
+
+First idea was to pay the 10% advance directly when a sale is created. It looks
+simple because one request creates the sale and also starts the payout. But this
+mixes two different things. If many sales come in together, this can send too
+many payout requests from the normal sale API. If the gateway is slow or fails,
+then creating a sale also becomes slow or messy.
+
+### Approach 2
+
+Another idea was to keep a separate advance-payout job. Sale creation only saves
+pending sales, and the job later picks the eligible ones. This is better because
+the sale API stays clean. The problem is that the job must be careful. If two job
+runs pick the same sale, it can double-pay unless there are guards like
+`advancePaidAt` and unique payout records.
+
+### Approach 3
+
+I also thought about keeping only one balance number on the user table and not
+making a ledger table. That would be easier to build at first. But later it
+becomes tough to manage because there is no proper history. If a payout fails,
+or an advance is clawed back, or the user asks why the balance changed, there is
+nothing clear to show.
+
+### Approach 4
+
+Another option was to not store the balance and calculate it every time from
+sales, payouts, and reversals. This is okay for small data, but it has poor load
+isolation. A simple balance screen and a withdrawal request both start depending
+on heavy aggregation queries. Later, if sales volume grows, the withdrawal path
+can become slow because it has to read too much history before deciding if the
+user can withdraw. So I kept a cached balance and ledger: the ledger gives
+history, and the cached balance keeps the hot withdrawal path small.
+
+### Approach 5
+
+I also thought about calling a real payout provider directly from the service
+logic. That feels more real, but it mixes provider failures with core balance
+logic. If the provider is slow, rate-limited, or sends duplicate webhooks, the
+main money code becomes harder to manage. I kept the payment gateway behind an
+interface so provider retries, webhook handling, and gateway-specific details
+stay isolated. The service only cares whether a payout moved to completed or
+failed, not how the provider works inside.
 
 ## API
 
@@ -87,49 +135,6 @@ A handful of environment variables drive everything:
 
 Errors come back as `{ "error": { "code", "message", "details?" } }` with a
 matching HTTP status (400, 404, 409, 422, or 429).
-
-### The same flow over HTTP
-
-```bash
-BASE=http://localhost:3000
-curl -s -XPOST $BASE/users  -H 'content-type: application/json' -d '{"handle":"john_doe"}'
-curl -s -XPOST $BASE/brands -H 'content-type: application/json' -d '{"code":"brand_1"}'
-
-# three pending sales of ₹40
-for i in 1 2 3; do
-  curl -s -XPOST $BASE/sales -H 'content-type: application/json' \
-    -d '{"userId":"john_doe","brand":"brand_1","earning":40}'
-done
-
-# advance-payout job: pays 10% of ₹120, i.e. ₹12 (run it again — nothing double-pays)
-curl -s -XPOST $BASE/jobs/advance-payout -H 'content-type: application/json' -d '{"userId":"john_doe"}'
-
-# reconcile each sale (grab the ids from GET /sales?userId=john_doe)
-curl -s -XPOST $BASE/sales/<id1>/reconcile -H 'content-type: application/json' -d '{"status":"rejected"}'
-curl -s -XPOST $BASE/sales/<id2>/reconcile -H 'content-type: application/json' -d '{"status":"approved"}'
-curl -s -XPOST $BASE/sales/<id3>/reconcile -H 'content-type: application/json' -d '{"status":"approved"}'
-
-# the balance is now ₹68 — withdraw it
-curl -s -XPOST $BASE/users/john_doe/withdrawals -H 'content-type: application/json' \
-  -d '{"amount":68,"idempotencyKey":"wd-1"}'
-
-# if that payout fails, the money is refunded and can be withdrawn again
-curl -s -XPOST $BASE/payouts/<payoutId>/settle -H 'content-type: application/json' -d '{"status":"failed"}'
-```
-
-## How the code is organised
-
-```
-prisma/schema.prisma        the data model (see docs/LLD.md §3)
-prisma/migrations/          SQL migration + lock file
-prisma/seed.js              seeds brand_1..3
-src/domain/                 money math and typed errors (pure, no I/O)
-src/db/prisma.js            PrismaClient and the DB connection helpers
-src/services/               the business logic, all transactional
-src/api/                    the Express app, routes, and middleware
-src/server.js               HTTP entrypoint
-src/demo.js                 the end-to-end walkthrough
-```
 
 ## What the system guarantees
 

@@ -10,6 +10,12 @@ export async function createUser({ handle }) {
   return prisma.user.create({ data: { handle } });
 }
 
+/** List every user (oldest first), serialized for the API. */
+export async function listUsers() {
+  const users = await prisma.user.findMany({ orderBy: { createdAt: 'asc' } });
+  return users.map(serializeUser);
+}
+
 /** Look up by internal id or by human handle. Throws NotFoundError if absent. */
 export async function getUserByHandleOrId(handleOrId) {
   const user = await prisma.user.findFirst({
